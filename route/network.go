@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/conntrack"
@@ -38,8 +39,7 @@ type NetworkManager struct {
 	networkInterfaces atomic.TypedValue[[]adapter.NetworkInterface]
 
 	autoDetectInterface    bool
-	defaultInterface       string
-	defaultMark            uint32
+	defaultOptions         adapter.NetworkOptions
 	autoRedirectOutputMark uint32
 
 	networkMonitor    tun.NetworkUpdateMonitor
@@ -58,11 +58,15 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, routeOp
 		logger:              logger,
 		interfaceFinder:     control.NewDefaultInterfaceFinder(),
 		autoDetectInterface: routeOptions.AutoDetectInterface,
-		defaultInterface:    routeOptions.DefaultInterface,
-		defaultMark:         routeOptions.DefaultMark,
-		pauseManager:        service.FromContext[pause.Manager](ctx),
-		platformInterface:   service.FromContext[platform.Interface](ctx),
-		outboundManager:     service.FromContext[adapter.OutboundManager](ctx),
+		defaultOptions: adapter.NetworkOptions{
+			DefaultInterface:       routeOptions.DefaultInterface,
+			DefaultMark:            routeOptions.DefaultMark,
+			DefaultNetworkStrategy: C.NetworkStrategy(routeOptions.DefaultNetworkStrategy),
+			DefaultFallbackDelay:   time.Duration(routeOptions.DefaultFallbackDelay),
+		},
+		pauseManager:      service.FromContext[pause.Manager](ctx),
+		platformInterface: service.FromContext[platform.Interface](ctx),
+		outboundManager:   service.FromContext[adapter.OutboundManager](ctx),
 	}
 	usePlatformDefaultInterfaceMonitor := nm.platformInterface != nil
 	enforceInterfaceMonitor := routeOptions.AutoDetectInterface
@@ -265,10 +269,6 @@ func (r *NetworkManager) NetworkInterfaces() []adapter.NetworkInterface {
 	return r.networkInterfaces.Load()
 }
 
-func (r *NetworkManager) DefaultInterface() string {
-	return r.defaultInterface
-}
-
 func (r *NetworkManager) AutoDetectInterface() bool {
 	return r.autoDetectInterface
 }
@@ -301,8 +301,19 @@ func (r *NetworkManager) AutoDetectInterfaceFunc() control.Func {
 	}
 }
 
-func (r *NetworkManager) DefaultMark() uint32 {
-	return r.defaultMark
+func (r *NetworkManager) ProtectFunc() control.Func {
+	if r.platformInterface != nil && r.platformInterface.UsePlatformAutoDetectInterfaceControl() {
+		return func(network, address string, conn syscall.RawConn) error {
+			return control.Raw(conn, func(fd uintptr) error {
+				return r.platformInterface.AutoDetectInterfaceControl(int(fd))
+			})
+		}
+	}
+	return nil
+}
+
+func (r *NetworkManager) DefaultOptions() adapter.NetworkOptions {
+	return r.defaultOptions
 }
 
 func (r *NetworkManager) RegisterAutoRedirectOutputMark(mark uint32) error {
